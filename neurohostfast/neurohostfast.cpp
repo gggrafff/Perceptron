@@ -1,0 +1,764 @@
+#include "stdafx.h"
+#include "mkl.h"
+#include <iostream>
+#include <ctime>
+#include <cmath>
+#include <string>
+#include <fstream>
+#include <windows.h>
+
+#define tr_speed 0.02f
+#define block 256
+//#define DEBUG
+//#define SAFETY
+#define TIMECONTROL
+
+/*#pragma comment(lib,"mkl_core.lib")
+#pragma comment(lib,"mkl_intel_thread.lib")
+#pragma comment(lib,"libiomp5md.lib")
+#pragma comment(lib,"mkl_intel_lp64.lib")
+#pragma comment(lib,"mkl_blas95_lp64.lib")*/
+
+using namespace std;
+
+
+class net {
+private:
+
+public:
+	net(int in_number, int layers_number, int* neurons_number) {
+		this->layers_number = layers_number;
+		this->in_number = in_number;
+		this->neurons_number = new int[layers_number];
+		for (int i = 0;i < layers_number;i++) this->neurons_number[i] = neurons_number[i];
+		weights_number = in_number*neurons_number[0];
+		for (int i = 1;i < layers_number;i++) weights_number += neurons_number[i] * neurons_number[i - 1];
+		weights = (float*)malloc(sizeof(int)*weights_number);
+		for (int i = 0;i < weights_number;i++) weights[i] = (float)(rand() % 200 - 100) / 1000.0f;
+		init();
+	}
+	net(string filename, bool txt_mode) {
+		open(filename, txt_mode);
+		init();
+	}
+	net(int in_number, int layers_number, int* neurons_number, float* weights) {
+		this->layers_number = layers_number;
+		this->in_number = in_number;
+		this->neurons_number = new int[layers_number];
+		for (int i = 0;i < layers_number;i++) this->neurons_number[i] = neurons_number[i];
+		weights_number = in_number*neurons_number[0];
+		for (int i = 1;i < layers_number;i++) weights_number += neurons_number[i] * neurons_number[i - 1];
+		this->weights = (float*)malloc(sizeof(float)*weights_number);
+		for (int i = 0;i < weights_number;i++) this->weights[i] = weights[i];
+		init();
+	}
+	net& operator=(const net& right) {
+		//проверка на самоприсваивание
+		if (this == &right) {
+			return *this;
+		}
+		this->layers_number = right.layers_number;
+		this->in_number = right.in_number;
+		this->neurons_number = new int[layers_number];
+		for (int i = 0;i < layers_number;i++) this->neurons_number[i] = right.neurons_number[i];
+		this->weights_number = right.weights_number;
+		this->weights = (float*)malloc(sizeof(int)*weights_number);
+		for (int i = 0;i < weights_number;i++) this->weights[i] = right.weights[i];
+		init();
+		return *this;
+	}
+	net(const net & object)
+	{
+		this->layers_number = object.layers_number;
+		this->in_number = object.in_number;
+		this->neurons_number = new int[layers_number];
+		for (int i = 0;i < layers_number;i++) this->neurons_number[i] = object.neurons_number[i];
+		this->weights_number = object.weights_number;
+		this->weights = (float*)malloc(sizeof(float)*weights_number);
+		for (int i = 0;i < weights_number;i++) this->weights[i] = object.weights[i];
+		init();
+	}
+	void init() {
+		int maxnumin = in_number;
+		for (int i = 0;i < layers_number;i++) if (maxnumin < neurons_number[i]) maxnumin = neurons_number[i];
+		dev_one = (float *)mkl_malloc(maxnumin * sizeof(float), 64);
+		dev_two = (float *)mkl_malloc(maxnumin * sizeof(float), 64);
+		dev_weights = (float *)mkl_malloc(weights_number * sizeof(float), 64);
+		for (int i = 0; i < weights_number;i++) dev_weights[i] = weights[i];
+		neurnum = 0;
+		for (int i = 0; i < layers_number; i++) neurnum += neurons_number[i];
+		dev_net = (float *)mkl_malloc(neurnum * sizeof(float), 64);
+		dev_der = (float *)mkl_malloc(neurnum * sizeof(float), 64);
+		dev_y = (float *)mkl_malloc(neurnum * sizeof(float), 64);
+		dev_g = (float *)mkl_malloc(neurnum * sizeof(float), 64);
+		dev_onein = (float *)mkl_malloc(in_number * sizeof(float), 64);
+		dev_oneout = (float *)mkl_malloc(neurons_number[layers_number - 1] * sizeof(float), 64);
+	}
+	void open(string filename, bool txt_mode) {
+		if (txt_mode) {
+			ifstream file(filename);
+			file >> this->layers_number;
+			file >> this->in_number;
+			neurons_number = new int[this->layers_number];
+			for (int i = 0;i < layers_number;i++) file >> neurons_number[i];
+			weights_number = in_number*neurons_number[0];
+			for (int i = 1;i < layers_number;i++) weights_number += neurons_number[i] * neurons_number[i - 1];
+			this->weights = (float*)malloc(sizeof(float)*weights_number);
+			for (int i = 0;i < weights_number;i++) file >> this->weights[i];
+			file.close();
+		}
+		else {
+			ifstream file(filename, ios::binary);
+			file.read((char*)&(this->layers_number), sizeof(this->layers_number));
+			file.read((char*)&(this->in_number), sizeof(this->in_number));
+			neurons_number = new int[this->layers_number];
+			file.read((char*)neurons_number, sizeof(int)*layers_number);
+			weights_number = in_number*neurons_number[0];
+			for (int i = 1;i < layers_number;i++) weights_number += neurons_number[i] * neurons_number[i - 1];
+			this->weights = (float*)malloc(sizeof(float)*weights_number);
+			file.read((char*)weights, sizeof(float)*weights_number);
+			file.close();
+		}
+		init();
+	}
+	void save(string filename, bool txt_mode) {
+		for (int i = 0; i < weights_number;i++) weights[i] = dev_weights[i];
+		if (txt_mode) {
+			ofstream file(filename);
+			file << this->layers_number << " ";
+			file << this->in_number << " ";
+			for (int i = 0;i < layers_number;i++) file << neurons_number[i] << " ";
+			for (int i = 0;i < weights_number;i++) file << this->weights[i] << " ";
+			file.close();
+		}
+		else {
+			ofstream file(filename, ios::binary);
+			file.write((char*)&(this->layers_number), sizeof(this->layers_number));
+			file.write((char*)&(this->in_number), sizeof(this->in_number));
+			file.write((char*)neurons_number, sizeof(int)*layers_number);
+			weights_number = in_number*neurons_number[0];
+			for (int i = 1;i < layers_number;i++) weights_number += neurons_number[i] * neurons_number[i - 1];
+			file.write((char*)weights, sizeof(float)*weights_number);
+			file.close();
+		}
+	}
+	~net() {
+		delete weights;
+		delete neurons_number;
+		mkl_free(dev_der);
+		mkl_free(dev_g);
+		mkl_free(dev_net);
+		mkl_free(dev_one);
+		mkl_free(dev_onein);
+		mkl_free(dev_oneout);
+		mkl_free(dev_two);
+		mkl_free(dev_weights);
+		mkl_free(dev_y);
+	}
+
+	int thresholdWithBlas(float* in, float* out, int n) {
+		for (int i = 0; i < n;i++) {
+			//линейна€ функци€
+			//out[i] = temp[threadIdx.x];
+
+			//—игмоида
+			out[i] = 1.0f / (1.0f + exp(-in[i]));
+		}
+		return 0;
+	}
+
+	int derivativeWithBlas(float* in, float* out, int n) {
+		for (int i = 0; i < n;i++) {
+			//линейна€ функци€
+			//out[i] = 1;
+
+			//—игмоиды
+			out[i] = exp(in[i]) / pow((1.0f + exp(in[i])), 2);
+		}
+		return 0;
+	}
+
+	int productWithBlas(float *in1, float *in2, float *out, int n, float m) {
+		for (int i = 0; i < n;i++) {
+			out[i] = (float)m*in1[i] * in2[i];
+		}
+		return 0;
+	}
+
+	int calcWithBlas(float *in, float *out)
+	{
+
+#if (defined TIMECONTROL) || (defined DEBUG)
+		ofstream file;
+#endif
+#ifdef TIMECONTROL
+		LARGE_INTEGER t1, t2, f;
+		QueryPerformanceCounter(&t1);
+#endif
+#ifdef DEBUG
+		file.open("calcinctrl.txt");
+		for (int i = 0;i < in_number;i++) {
+			file << in[i] << " ";
+		}
+		file.close();
+#endif
+		for (int i = 0;i < in_number;i++) dev_one[i] = in[i];
+		int wnum = 0;
+
+		cblas_sgemm(CblasColMajor, CblasTrans, CblasNoTrans,
+			1, neurons_number[0], in_number,
+			1.0f,
+			dev_one, in_number,
+			dev_weights + wnum, in_number,
+			0,
+			dev_two, 1);
+		wnum += in_number*neurons_number[0];
+		thresholdWithBlas(dev_two, dev_one, in_number);
+
+		for (int l = 1; l < layers_number;l++) {
+			cblas_sgemm(CblasColMajor, CblasTrans, CblasNoTrans,
+				1, neurons_number[l], neurons_number[l - 1],
+				1.0f,
+				dev_one, neurons_number[l - 1],
+				dev_weights + wnum, neurons_number[l - 1],
+				0,
+				dev_two, 1);
+			wnum += neurons_number[l - 1] * neurons_number[l];
+			thresholdWithBlas(dev_two, dev_one, neurons_number[l - 1]);
+		}
+		for (int i = 0;i < neurons_number[layers_number - 1];i++) out[i] = dev_one[i];
+
+#ifdef DEBUG
+		file.open("calcoutctrl.txt");
+		for (int i = 0;i < neurons_number[layers_number - 1];i++) {
+			file << out[i] << " ";
+		}
+		file.close();
+#endif
+#ifdef TIMECONTROL
+		QueryPerformanceCounter(&t2);
+		QueryPerformanceFrequency(&f);
+		double sec = double(t2.QuadPart - t1.QuadPart) / f.QuadPart * 1000.0;
+		file.open("timecontrol.txt", ios::app);
+		file << "calc => " << sec << "ms\n";
+		file.close();
+#endif
+		return 0;
+	}
+
+	int trainingWithBlas(float *in, float *out) {
+#if (defined TIMECONTROL) || (defined DEBUG)
+		ofstream file;
+#endif
+#ifdef TIMECONTROL
+		LARGE_INTEGER t1, t2, f;
+		QueryPerformanceCounter(&t1);
+#endif
+
+		for (int i = 0;i < in_number;i++) dev_onein[i] = in[i];
+		for (int i = 0;i < neurons_number[layers_number - 1];i++) dev_oneout[i] = out[i];
+
+		int wnum = 0;
+		int ynum = 0;
+		int nnum = 0;
+		cblas_sgemm(CblasColMajor, CblasTrans, CblasNoTrans,
+			1, neurons_number[0], in_number,
+			1.0f,
+			dev_onein, in_number,
+			dev_weights + wnum, in_number,
+			0,
+			dev_net + nnum, 1);
+		wnum += in_number*neurons_number[0];
+		thresholdWithBlas(dev_net + nnum, dev_y + ynum, neurnum);
+		nnum += neurons_number[0];
+
+		for (int l = 1; l < layers_number;l++) {
+			cblas_sgemm(CblasColMajor, CblasTrans, CblasNoTrans,
+				1, neurons_number[l], neurons_number[l - 1],
+				1.0f,
+				dev_y + ynum, neurons_number[l - 1],
+				dev_weights + wnum, neurons_number[l - 1],
+				0,
+				dev_net + nnum, 1);
+			ynum += neurons_number[l - 1];
+			wnum += neurons_number[l - 1] * neurons_number[l];
+			thresholdWithBlas(dev_net + nnum, dev_y + ynum, neurons_number[l]);
+			nnum += neurons_number[l];
+		}
+
+		derivativeWithBlas(dev_net, dev_der, neurnum);
+		//============================================
+		wnum = weights_number;
+		ynum = neurnum - neurons_number[layers_number - 1];
+		int dnum = neurnum - neurons_number[layers_number - 1];
+		int gnum = neurnum - neurons_number[layers_number - 1];
+		cblas_saxpy(neurons_number[layers_number - 1],
+			-1.0f,
+			dev_y + ynum, 1,
+			dev_oneout, 1);
+
+		productWithBlas(dev_oneout, dev_der + dnum, dev_g + gnum, neurons_number[layers_number - 1], 2.0f);
+		//nnum += neurons_number[0];
+		//wnum -= neurons_number[layers_number - 2]*neurons_number[layers_number - 1];
+		for (int l = layers_number - 2; l >= 0;l--) {
+			wnum -= neurons_number[l + 1] * neurons_number[l];
+			cblas_sgemm(CblasColMajor, CblasTrans, CblasTrans,
+				1, neurons_number[l], neurons_number[l + 1],
+				1.0f,
+				dev_g + gnum, neurons_number[l + 1],
+				dev_weights + wnum, neurons_number[l],
+				0,
+				dev_g + gnum - neurons_number[l], 1);
+			gnum -= neurons_number[l];
+			dnum -= neurons_number[l];
+			productWithBlas(dev_g + gnum, dev_der + dnum, dev_g + gnum, neurons_number[l], 1.0f);
+		}
+
+		//========================
+
+		gnum = 0;
+		wnum = 0;
+		ynum = 0;
+		cblas_sgemm(CblasColMajor, CblasNoTrans, CblasNoTrans,
+			in_number, neurons_number[0], 1,
+			tr_speed,
+			dev_onein, in_number,
+			dev_g + nnum, 1,
+			1.0f,
+			dev_weights + wnum, in_number);
+		gnum += neurons_number[0];
+		wnum += in_number * neurons_number[0];
+		for (int l = 1; l < layers_number;l++) {
+			cblas_sgemm(CblasColMajor, CblasNoTrans, CblasNoTrans,
+				neurons_number[l - 1], neurons_number[l], 1,
+				tr_speed,
+				dev_y + ynum, neurons_number[l - 1],
+				dev_g + gnum, 1,
+				1.0f,
+				dev_weights + wnum, neurons_number[l - 1]);
+			gnum += neurons_number[l];
+			wnum += neurons_number[l - 1] * neurons_number[l];
+			ynum += neurons_number[l - 1];
+		}
+
+
+#ifdef TIMECONTROL
+		QueryPerformanceCounter(&t2);
+		QueryPerformanceFrequency(&f);
+		double sec = double(t2.QuadPart - t1.QuadPart) / f.QuadPart * 1000.0;
+		file.open("timecontrol.txt", ios::app);
+		file << "training => " << sec << "ms\n";
+		file.close();
+#endif
+		return 0;
+	}
+
+	int layers_number;
+	int in_number;
+	int weights_number;
+	int neurnum;
+	int* neurons_number;
+	float* weights;
+	float *dev_one;
+	float *dev_two;
+	float *dev_weights;
+	float* dev_net;
+	float* dev_der;
+	float* dev_y;
+	float* dev_g;
+	float *dev_onein;
+	float *dev_oneout;
+};
+
+void txt_read(float* in, int in_number, string filename) {
+	ifstream file(filename);
+	int i = 0;
+	for (;i < in_number;i++) {
+		if (file.eof()) break;
+		file >> in[i];
+	}
+	file.close();
+	for (;i < in_number;i++) in[i] = 0;
+}
+struct bmpinfo {
+	int size, pixels_adress, width, height;
+	short int bits_per_pixel;
+	bmpinfo() {
+		size = 0;
+		pixels_adress = 0;
+		width = 0;
+		height = 0;
+		bits_per_pixel = 0;
+	}
+};
+bmpinfo bmp_read(float* in, int in_number, string filename) {
+	// ќткрываем файл
+	ifstream file(filename, ios::in | ios::binary);
+
+	bmpinfo info;
+
+	// ѕереходим на 2 байт
+	file.seekg(2, ios::beg);
+
+	// —читываем размер файла
+	file.read((char*)&info.size, sizeof(int));
+
+	// ѕереходим на 10 байт
+	file.seekg(10, ios::beg);
+
+	// —читываем адрес начала массива пикселей
+	file.read((char*)&info.pixels_adress, sizeof(int));
+
+	file.seekg(18, ios::beg);
+
+	// —читываем ширину и высоту изображени€ (в пиксел€х)
+	file.read((char*)&info.width, sizeof(int));
+
+	file.read((char*)&info.height, sizeof(int));
+
+
+	file.seekg(28, ios::beg);
+
+	// считываем кол-во битов на пиксель
+	file.read((char*)&info.bits_per_pixel, sizeof(short int));
+
+	file.seekg(info.pixels_adress, ios::beg);
+
+	int i = 0;
+	int offset = (32 - ((info.bits_per_pixel*info.width) % 32)) / 8;
+	///////////////////// 1 BIT
+	if (info.bits_per_pixel == 1)
+	{
+		unsigned char bgr;
+
+		for (int y = info.height - 1; y >= 0; y--)
+		{
+			for (int x = 0; x < info.width; x++)
+			{
+				file.read((char*)&bgr, 1);
+
+				if (x >= info.width - 4)
+				{
+					for (int n = 7; n >= 4; n--)
+					{
+						if (bgr & (1 << n)) // if 1 bit of readed pixels and 0b10000000
+							in[i++] = 0;
+						else
+							in[i++] = 1;
+
+						if (n != 4) x++;
+					}
+				}
+
+				else
+				{
+					for (int n = 7; n >= 0; n--)
+					{
+						if (bgr & (1 << n)) // if 1 bit of readed pixels and 0b10000000
+							in[i++] = 0;
+						else
+							in[i++] = 1;
+
+						if (n != 0) x++;
+					}
+				}
+			}
+			file.read((char*)&bgr, offset); // offset
+		}
+	}
+	//////////////// 1 bit END
+	///////////////////// 4 BIT
+	else if (info.bits_per_pixel == 4)
+	{
+		unsigned char bgr;
+
+		for (int y = info.height - 1; y >= 0; y--)
+		{
+			for (int x = 0; x < info.width; x++)
+			{
+
+				file.read((char*)&bgr, 1);
+
+				if (bgr & 0xF0)
+					in[i++] = 0;
+				else
+					in[i++] = 1;
+
+				x++;
+
+				if (bgr & 0x0F)
+					in[i++] = 0;
+				else
+					in[i++] = 1;
+			}
+			file.read((char*)&bgr, offset); // offset
+		}
+	}
+	//////////////// 4 bit END
+	///////////////////// 8 BIT
+	else if (info.bits_per_pixel == 8)
+	{
+		unsigned char bgr;
+
+		for (int y = info.height - 1; y >= 0; y--)
+		{
+			for (int x = 0; x < info.width; x++)
+			{
+
+				file.read((char*)&bgr, 1);
+
+				if (bgr == 0xFF)
+					in[i++] = 0;
+				else
+					in[i++] = 1;
+			}
+			file.read((char*)&bgr, offset); // offset
+		}
+	}
+	//////////////// 8 bit END
+	///////////////////// 16 BIT
+	else if (info.bits_per_pixel == 16)
+	{
+		unsigned short int bgr;
+
+		for (int y = info.height - 1; y >= 0; y--)
+		{
+			for (int x = 0; x < info.width; x++)
+			{
+				file.read((char*)&bgr, 2);
+
+				if (bgr >= 0xFFF)
+					in[i++] = 0;
+				else
+					in[i++] = 1;
+			}
+			file.read((char*)&bgr, offset); // offset
+		}
+	}
+	//////////////// 16 bit END
+	///////////////////// 24 BIT
+	else if (info.bits_per_pixel == 24)
+	{
+		unsigned int bgr = 0;
+
+		for (int y = info.height - 1; y >= 0; y--)
+		{
+			for (int x = 0; x < info.width; x++)
+			{
+				file.read((char*)&bgr, 3);
+
+				//cout << bgr << endl;
+
+				if (bgr == 0xFFFFFF)
+					in[i++] = 0;
+				else
+					in[i++] = 1;
+
+				bgr = 0;
+			}
+			file.read((char*)&bgr, offset); // offset
+		}
+	}
+	//////////////// 24 bit END
+	///////////////////// 32 BIT
+	else if (info.bits_per_pixel == 32)
+	{
+		unsigned int bgr;
+
+		for (int y = info.height - 1; y >= 0; y--)
+		{
+			for (int x = 0; x < info.width; x++)
+			{
+				file.read((char*)&bgr, 4);
+
+				if (bgr >= 0xFFFFFF)
+					in[i++] = 0;
+				else
+					in[i++] = 0;
+			}
+		}
+	}
+	//////////////// 32 bit END
+	else
+	{
+		cerr << "»звините, ¬аше изображение должно иметь 1, 4, 8, 16, 24 или 32 бит на пиксель. " << endl;
+	}
+	file.close();
+	for (;i < in_number;i++) in[i] = 0;
+	return info;
+}
+
+
+
+int main()
+{
+	srand(time(0)); // автоматическа€ рандомизаци€
+
+	string comand = "";
+	bool training_mode = false;
+	bool bmp_mode = false;
+	bool txt_mode = false;
+	string infile = "in.txt";
+	string outfile = "out.txt";
+	setlocale(LC_ALL, "Russian");
+	cout << "¬ерси€ дл€ CPU. Ѕыстра€. \n¬ведите команду:\n\"file\" - загрузить нейросеть из файла\n\"txt\" - установить тип входного файла - текстовый\n\"bin\" - установить тип входного файла - двоичный\n\"new\" - создать новую нейросеть\n\"exit\" - выйти\n";
+	net* neuro;
+	while (comand != "exit") {
+		cin >> comand;
+#ifdef DEBUG
+		cout << "¬ведено в цикле 1: " << comand << "\n";
+#endif
+		if (comand == "exit") break;
+		if (comand == "file") {
+			string file = "";
+			cout << "¬ведите адрес файла:\n";
+			cin >> file;
+#ifdef DEBUG
+			cout << "¬ведено: " << file << "\n";
+#endif
+			neuro = new net(file, txt_mode);
+			cout << "OK\n";
+			break;
+		}
+		if (comand == "txt") {
+			txt_mode = true;
+		}
+		if (comand == "bin") {
+			txt_mode = false;
+		}
+		if (comand == "new") {
+			int layers_number;
+			cout << "¬ведите количество слоЄв:\n";
+			cin >> layers_number;
+			int in_number;
+			cout << "¬ведите количество входов сети:\n";
+			cin >> in_number;
+			int* neurons_number = new int[layers_number];
+			for (int i = 0;i < layers_number;i++) {
+				cout << "¬ведите количество нейронов " << i << "-го сло€:\n";
+				cin >> neurons_number[i];
+			}
+			neuro = new net(in_number, layers_number, neurons_number);
+			cout << "OK\n";
+			break;
+		}
+	}
+	cout << "¬ведите команду:\n\"normal\" - перейти в рабочий режим (по умолчанию)\n\"training\" - перейти в режим обучени€\n";
+	cout << "\"txt\" - указать входной текстовый файл (по умолчанию in.txt)\n\"bmp\" - указать входной *.bmp файл\n";
+	cout << "\"out\" - указать выходной текстовый файл (по умолчанию out.txt)\n";
+	cout << "\"run\" - запустить\n\"save\" - сохранить сеть в файл\n";
+	cout << "\"open\" - загрузить сеть из файла\n\"exit\" - выйти\n";
+	while (comand != "exit") {
+		cin >> comand;
+#ifdef DEBUG
+		cout << "¬ведено в цикле 2: " << comand << "\n";
+#endif
+		if (comand == "exit") break;
+		if (comand == "normal") training_mode = false;
+		if (comand == "training") training_mode = true;
+		if (comand == "txt") {
+			bmp_mode = false;
+			cout << "¬ведите адрес файла:\n";
+			cin >> infile;
+#ifdef DEBUG
+			cout << "¬ведено: " << infile << "\n";
+#endif
+			cout << "OK\n";
+		}
+		if (comand == "bmp") {
+			bmp_mode = true;
+			cout << "¬ведите адрес файла:\n";
+			cin >> infile;
+#ifdef DEBUG
+			cout << "¬ведено: " << infile << "\n";
+#endif
+			cout << "OK\n";
+		}
+		if (comand == "out") {
+			cout << "¬ведите адрес файла:\n";
+			cin >> outfile;
+#ifdef DEBUG
+			cout << "¬ведено: " << outfile << "\n";
+#endif
+			cout << "OK\n";
+		}
+		if (comand == "save") {
+			string file = "";
+			cout << "¬ведите адрес файла:\n";
+			cin >> file;
+#ifdef DEBUG
+			cout << "¬ведено: " << file << "\n";
+#endif
+			neuro->save(file, txt_mode);
+			cout << "OK\n";
+		}
+		if (comand == "open") {
+			string file = "";
+			cout << "¬ведите адрес файла:\n";
+			cin >> file;
+#ifdef DEBUG
+			cout << "¬ведено: " << file << "\n";
+#endif
+			neuro->open(file, txt_mode);
+			cout << "OK\n";
+		}
+		if (comand == "run") {
+			float* in = new float[neuro->in_number];
+			if (!bmp_mode) {
+				txt_read(in, neuro->in_number, infile);
+			}
+			else {
+				bmpinfo info = bmp_read(in, neuro->in_number, infile);
+#ifdef DEBUG
+				cout << "Bits per pixel: " << info.bits_per_pixel << "\n";
+				cout << "Height: " << info.height << "\n";
+				cout << "Width: " << info.width << "\n";
+				cout << "Pixels adress: " << info.pixels_adress << "\n";
+				cout << "Size: " << info.size << "\n";
+#endif
+			}
+#ifdef DEBUG
+			ofstream file("inctrl.txt");
+			for (int i = 0;i < neuro->in_number;i++) {
+				file << in[i] << " ";
+			}
+			file.close();
+#endif
+			if (!training_mode) {
+				float* out = (float*)malloc(neuro->neurons_number[neuro->layers_number - 1] * sizeof(float));
+				neuro->calcWithBlas(in, out);
+				ofstream file(outfile);
+				for (int i = 0;i < neuro->neurons_number[neuro->layers_number - 1];i++) {
+					file << out[i] << " ";
+				}
+				file.close();
+			}
+			else {
+				ifstream file(outfile);
+				float* out = new float[neuro->neurons_number[neuro->layers_number - 1]];
+				int i = 0;
+				for (;i < neuro->neurons_number[neuro->layers_number - 1];i++) {
+					if (file.eof()) break;
+					file >> out[i];
+				}
+				file.close();
+				for (;i < neuro->neurons_number[neuro->layers_number - 1];i++) out[i] = 0;
+
+#ifdef DEBUG
+				ofstream file2("outctrl.txt");
+				for (int i = 0;i < neuro->neurons_number[neuro->layers_number - 1];i++) {
+					file2 << out[i] << " ";
+				}
+				file2.close();
+#endif
+				neuro->trainingWithBlas(in, out);
+			}
+			cout << "OK\n";
+		}
+	}
+	// cudaDeviceReset must be called before exiting in order for profiling and
+	// tracing tools such as Nsight and Visual Profiler to show complete traces.
+
+	return 0;
+}
+
